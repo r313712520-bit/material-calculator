@@ -1,0 +1,222 @@
+import React, { useState, useEffect } from 'react';
+
+// --- 图标组件 ---
+const Icons = {
+  Calculator: ({ className }) => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><rect width="16" height="20" x="4" y="2" rx="2"/><line x1="8" x2="16" y1="6" y2="6"/><line x1="16" x2="16" y1="14" y2="18"/><path d="M16 10h.01"/><path d="M12 10h.01"/><path d="M8 10h.01"/><path d="M12 14h.01"/><path d="M8 14h.01"/><path d="M12 18h.01"/><path d="M8 18h.01"/></svg>,
+  Database: ({ className }) => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 21 19V5"/><path d="M3 12A9 3 0 0 0 21 12"/></svg>,
+  Trash: ({ className }) => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>,
+  Alert: ({ className }) => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+};
+
+// --- 初始预设 ---
+const DEFAULT_DENSITY = 7.85; 
+const INITIAL_DB = [
+  { key: "10#槽钢", val: "10" },
+  { key: "6#槽钢", val: "6.634" },
+  { key: "8#槽钢", val: "8.045" },
+  { key: "5#角铁", val: "3.77" },
+  { key: "5#扁铁", val: "1.96" },
+  { key: "50mm*50mm*δ5mm方管", val: "6.559" },
+  { key: "Φ159管", val: "18.99" }
+];
+const INITIAL_UNITS = ["m", "mm", "组", "块", "个", "根", "只", "支", "把", "米", "眼", "处"];
+
+export default function MaterialExpert() {
+  const [input, setInput] = useState("10#槽钢2m*2组 + (δ2.5mm不锈钢板1.2m*2.4m)*3块");
+  const [formula, setFormula] = useState("");
+  const [excluded, setExcluded] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [showDb, setShowDb] = useState(false);
+
+  // 数据库持久化：优先从本地浏览器存储加载
+  const [matDb, setMatDb] = useState(() => {
+    const saved = localStorage.getItem('v4_mat_db');
+    return saved ? JSON.parse(saved) : INITIAL_DB;
+  });
+  const [unitDb, setUnitDb] = useState(() => {
+    const saved = localStorage.getItem('v4_unit_db');
+    return saved ? JSON.parse(saved) : INITIAL_UNITS;
+  });
+
+  useEffect(() => {
+    localStorage.setItem('v4_mat_db', JSON.stringify(matDb));
+    localStorage.setItem('v4_unit_db', JSON.stringify(unitDb));
+  }, [matDb, unitDb]);
+
+  // --- 核心解析引擎 ---
+  const calculate = () => {
+    if (!input.trim()) return;
+
+    // 1. 预清洗：乘号归一化，中英文括号统一，去掉空格
+    let text = input.replace(/[xX×]/g, '*').replace(/（/g, '(').replace(/）/g, ')').replace(/\s+/g, '');
+
+    const parseLogic = (str) => {
+      // 顶层加号分割（避开括号内）
+      let parts = [];
+      let temp = '';
+      let d = 0;
+      for (let char of str) {
+        if (char === '(') d++; else if (char === ')') d--;
+        if (char === '+' && d === 0) { parts.push(temp); temp = ''; } else { temp += char; }
+      }
+      if (temp) parts.push(temp);
+
+      let fs = []; // 公式部分
+      let es = []; // 异常部分
+
+      parts.forEach(p => {
+        // 识别组模式：(内容)*倍数
+        const group = p.match(/^\((.*)\)\*?(\d+(?:\.\d+)?)/);
+        if (group) {
+          const inner = parseLogic(group[1]);
+          const mult = group[2];
+          if (inner.f) fs.push(`(${inner.f})*${mult}`);
+          inner.e.forEach(err => es.push(`${err}*${mult}`));
+        } else {
+          // 单项解析
+          let itemStr = p;
+          let isMatch = false;
+
+          // A. 数据库匹配（长词优先，确保 10#槽钢 不会先匹配到 1#）
+          const sortedDb = [...matDb].sort((a, b) => b.key.length - a.key.length);
+          for (let m of sortedDb) {
+            if (itemStr.includes(m.key)) {
+              itemStr = itemStr.split(m.key).join(`*(${m.val})*`);
+              isMatch = true;
+              break;
+            }
+          }
+
+          // B. 板材自动识别（固定 7.85）
+          const plate = itemStr.match(/δ(\d+(?:\.\d+)?)mm/);
+          if (plate) {
+            itemStr = itemStr.replace(plate[0], `*(${plate[1]}*${DEFAULT_DENSITY})*`);
+            isMatch = true;
+          }
+
+          // C. 提取与清洗
+          // 移除单位
+          unitDb.forEach(u => itemStr = itemStr.split(u).join(''));
+          // 只保留数字和四则运算符号
+          let math = itemStr.replace(/[^0-9.+\-*/()]/g, '');
+          // 语法修正：修复 ** -> *，去除首尾符号
+          math = math.replace(/\*+/g, '*').replace(/\+\+/g, '+').replace(/\(\*/g, '(').replace(/\*\)/g, ')').replace(/^[\+\*]|[\+\*]$/g, '');
+
+          if (isMatch || (math && /^[0-9.+\-*/()]+$/.test(math))) {
+            if(math) fs.push(math);
+          } else {
+            if(p) es.push(p);
+          }
+        }
+      });
+      return { f: fs.join('+'), e: es };
+    };
+
+    const result = parseLogic(text);
+    const finalF = result.f.replace(/\+\+/g, '+');
+    setFormula(finalF);
+    setExcluded(result.e);
+
+    try {
+      const res = new Function(`return (${finalF || 0})`)();
+      setTotal(Number(res.toFixed(3)));
+    } catch {
+      setTotal("计算错误");
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-gray-100 p-4 md:p-8 font-sans text-gray-800">
+      <div className="max-w-4xl mx-auto space-y-4">
+        
+        {/* 标题栏 */}
+        <div className="flex justify-between items-center bg-white p-4 rounded-xl shadow-sm">
+          <div className="flex items-center gap-2 text-blue-600 font-bold text-lg">
+            <Icons.Calculator /> <span>智能材料转换专家</span>
+          </div>
+          <button onClick={() => setShowDb(!showDb)} className="flex items-center gap-1 text-sm bg-gray-50 border px-3 py-1.5 rounded-lg hover:bg-gray-100 transition-colors">
+            <Icons.Database className="w-4 h-4" /> 数据库管理
+          </button>
+        </div>
+
+        {/* 数据库折叠层 */}
+        {showDb && (
+          <div className="bg-white border-2 border-blue-50 rounded-xl p-4 shadow-inner space-y-4 animate-in slide-in-from-top duration-200">
+            <div className="text-xs font-bold text-blue-500 uppercase">材料理论重量表 (密度: {DEFAULT_DENSITY})</div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 max-h-40 overflow-y-auto">
+              {matDb.map((m, i) => (
+                <div key={i} className="flex justify-between items-center bg-gray-50 p-2 rounded border text-xs font-mono">
+                  <span className="truncate">{m.key} = {m.val}</span>
+                  <button onClick={() => setMatDb(matDb.filter((_, idx) => idx !== i))} className="text-red-400 hover:text-red-600 ml-2"><Icons.Trash className="w-3 h-3"/></button>
+                </div>
+              ))}
+            </div>
+            <div className="flex gap-2 pt-2 border-t">
+              <input id="addK" placeholder="材料名称" className="flex-1 text-xs border rounded p-2 shadow-sm" />
+              <input id="addV" placeholder="理论值" className="w-20 text-xs border rounded p-2 shadow-sm" />
+              <button onClick={() => {
+                const k = document.getElementById('addK').value;
+                const v = document.getElementById('addV').value;
+                if(k && v) { setMatDb([{key:k, val:v}, ...matDb]); document.getElementById('addK').value=''; document.getElementById('addV').value=''; }
+              }} className="bg-blue-600 text-white px-4 rounded text-xs font-bold">添加</button>
+            </div>
+          </div>
+        )}
+
+        {/* 工作区 */}
+        <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
+          {/* 左侧输入 */}
+          <div className="md:col-span-3 space-y-3">
+            <div className="bg-white p-4 rounded-2xl shadow-sm border border-transparent focus-within:border-blue-300 transition-all">
+              <textarea 
+                className="w-full h-64 resize-none outline-none text-sm font-mono leading-relaxed"
+                placeholder="在此粘贴清单，如：10#槽钢2m*2组 + δ2mm板1m*1m"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+              />
+            </div>
+            <button onClick={calculate} className="w-full py-4 bg-blue-600 text-white rounded-2xl font-black text-lg shadow-lg shadow-blue-200 hover:bg-blue-700 active:scale-95 transition-all">
+              开始转换重量
+            </button>
+          </div>
+
+          {/* 右侧结果 */}
+          <div className="md:col-span-2 space-y-4">
+            {/* 总重展示 */}
+            <div className="bg-slate-900 rounded-3xl p-6 text-white shadow-xl relative overflow-hidden">
+              <div className="relative z-10">
+                <div className="text-slate-400 text-xs font-bold mb-1 uppercase tracking-widest">Total Weight</div>
+                <div className="text-5xl font-black">{total} <span className="text-lg font-normal text-slate-400">kg</span></div>
+              </div>
+              <div className="absolute -right-4 -bottom-4 opacity-10 rotate-12"><Icons.Calculator className="w-24 h-24" /></div>
+            </div>
+
+            {/* 公式展示 */}
+            <div className="bg-white p-4 rounded-xl border shadow-sm">
+              <div className="text-[10px] font-bold text-gray-400 mb-2 uppercase">解析数学公式</div>
+              <div className="text-xs font-mono text-gray-600 break-all bg-gray-50 p-2 rounded leading-normal">
+                {formula || "等待计算..."}
+              </div>
+            </div>
+
+            {/* 剔除提醒 */}
+            {excluded.length > 0 && (
+              <div className="bg-amber-50 border border-amber-100 rounded-xl p-4">
+                <div className="text-xs font-bold text-amber-600 flex items-center gap-1 mb-2">
+                  <Icons.Alert className="w-3 h-3" /> 无法识别的部分
+                </div>
+                {excluded.map((err, i) => (
+                  <div key={i} className="text-[11px] text-amber-800 font-mono bg-white/60 p-1 px-2 rounded mb-1">{err}</div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="text-center text-[10px] text-gray-400 pt-4">
+          计算原理：[材料名匹配替换数值] -> [清洗单位字符] -> [递归处理括号倍数] -> [数学公式执行]
+        </div>
+      </div>
+    </div>
+  );
+}
